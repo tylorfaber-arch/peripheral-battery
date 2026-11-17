@@ -1,0 +1,220 @@
+#!/usr/bin/env python3
+"""peripheral-battery: show wireless mouse/headset/controller battery levels.
+
+Usage:
+  peripheral-battery            print one line, e.g. "🖱 82%  🎧 64%"
+  peripheral-battery --widget   panel line + per-device tooltip lines
+  peripheral-battery --alert    notify when a configured device is low
+  peripheral-battery list       show every device that can be detected
+  peripheral-battery setup      choose devices, labels, icons, thresholds
+"""
+import configparser, glob, json, os, re, shlex, subprocess, sys, time
+
+VERSION = "1.0.0"
+CONFIG_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")), "peripheral-battery")
+CONFIG = os.path.join(CONFIG_DIR, "devices.conf")
+DEFAULT_LOW = 15
+
+KIND_ICON = {"mouse": "🖱", "keyboard": "⌨", "headset": "🎧", "controller": "🎮", "device": "🔋"}
+
+def run(cmd, timeout=5):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+def read(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+# ---------- sources: each yields dicts {source, id, name, kind, level, charging} ----------
+
+def scan_openrazer():
+    for path in sorted(glob.glob("/sys/bus/hid/drivers/razer*/*/charge_level")):
+        d = os.path.dirname(path)
+        driver = os.path.basename(os.path.dirname(d))
+        raw = read(path)
+        name = read(os.path.join(d, "device_type")) or os.path.basename(d)
+        kind = {"razermouse": "mouse", "razerkbd": "keyboard"}.get(driver, "device")
+        if "headset" in name.lower() or "kraken" in name.lower() or "barracuda" in name.lower():
+            kind = "headset"
+        level = round(int(raw) * 100 / 255) if raw and raw.isdigit() else None
+        yield dict(source="openrazer", id=name, name=name, kind=kind, level=level,
+                   charging=read(os.path.join(d, "charge_status")) == "1")
+
+def scan_headsetcontrol():
+    out = run(["headsetcontrol", "-b", "-o", "json"])
+    try:
+        data = json.loads(out)
+    except ValueError:
+        return
+    for dev in data.get("devices", []):
+        vid = dev.get("id_vendor", "").replace("0x", "")
+        pid = dev.get("id_product", "").replace("0x", "")
+        bat = dev.get("battery") or {}
+        status = bat.get("status", "")
+        level = bat.get("level") if status in ("BATTERY_AVAILABLE", "BATTERY_CHARGING") else None
+        if isinstance(level, int) and level < 0:
+            level = None
+        yield dict(source="headsetcontrol", id=f"{vid}:{pid}", name=dev.get("product") or dev.get("device", "Headset"),
+                   kind="headset", level=level, charging=status == "BATTERY_CHARGING")
+
+def scan_upower():
+    for path in run(["upower", "-e"]).split():
+        if path.endswith("DisplayDevice") or "line_power" in path:
+            continue
+        info = run(["upower", "-i", path])
+        fields = dict(re.findall(r"^\s*([\w-]+):\s+(.*?)\s*$", info, re.M))
+        dtype = next((l.strip() for l in info.splitlines()[1:4] if l.startswith("  ") and ":" not in l), "")
+        if dtype in ("battery", "ups", "line-power") and fields.get("power supply") == "yes":
+            continue  # laptop battery, not a peripheral
+        kind = {"mouse": "mouse", "keyboard": "keyboard", "headset": "headset", "headphones": "headset",
+                "gaming-input": "controller"}.get(dtype, "device")
+        pct = re.match(r"(\d+(?:\.\d+)?)%", fields.get("percentage", ""))
+        name = fields.get("model") or os.path.basename(path)
+        yield dict(source="upower", id=fields.get("native-path", path), name=name, kind=kind,
+                   level=round(float(pct.group(1))) if pct else None,
+                   charging=fields.get("state") == "charging")
+
+SCANNERS = {"openrazer": scan_openrazer, "headsetcontrol": scan_headsetcontrol, "upower": scan_upower}
+
+def scan_all():
+    found = []
+    for scan in SCANNERS.values():
+        found.extend(scan())
+    return found
+
+def read_command(cmd):
+    out = run(shlex.split(cmd), timeout=10)
+    m = re.search(r"(\d+(?:\.\d+)?)", out)
+    return (round(float(m.group(1))) if m else None), "charg" in out.lower()
+
+# ---------- config ----------
+
+def load_config():
+    cfg = configparser.ConfigParser(interpolation=None)
+    cfg.read(CONFIG, encoding="utf-8")
+    return cfg
+
+def configured_devices(cfg):
+    """Return list of (label, icon, low, reading) for each device to show."""
+    low_default = cfg.getint("settings", "low", fallback=DEFAULT_LOW)
+    sections = [s for s in cfg.sections() if s.startswith("device:")]
+    if not sections:  # no config yet: show everything that's detected
+        return [(d["name"], KIND_ICON[d["kind"]], low_default, d) for d in scan_all()]
+    cache, result = {}, []
+    for s in sections:
+        sec = cfg[s]
+        label = s.split(":", 1)[1].strip()
+        src = sec.get("source", "").strip()
+        icon = sec.get("icon", KIND_ICON["device"])
+        low = sec.getint("low", fallback=low_default)
+        if src == "command":
+            lvl, chg = read_command(sec.get("command", ""))
+            dev = dict(level=lvl, charging=chg, name=label)
+        elif src in SCANNERS:
+            if src not in cache:
+                cache[src] = list(SCANNERS[src]())
+            match = sec.get("match", "").lower()
+            dev = next((d for d in cache[src] if match in d["id"].lower() or match in d["name"].lower()),
+                       dict(level=None, charging=False, name=label))
+        else:
+            dev = dict(level=None, charging=False, name=f"{label} (unknown source '{src}')")
+        result.append((label, icon, low, dev))
+    return result
+
+# ---------- output ----------
+
+def fmt(icon, dev):
+    if dev["level"] is None:
+        return f"{icon} --"
+    return f"{icon} {dev['level']}%{'⚡' if dev['charging'] else ''}"
+
+def detail(label, dev):
+    if dev["level"] is None:
+        return f"{label}: offline"
+    return f"{label}: {dev['level']}%{' (charging)' if dev['charging'] else ''}"
+
+def alert(devices):
+    for label, _icon, low, dev in devices:
+        if dev["level"] is None or dev["charging"] or dev["level"] > low:
+            continue
+        safe = re.sub(r"\W+", "_", label)
+        stamp = f"/run/user/{os.getuid()}/peripheral-battery-{safe}"
+        try:
+            if time.time() - os.path.getmtime(stamp) < 1800:
+                continue
+        except OSError:
+            pass
+        open(stamp, "w").close()
+        run(["notify-send", "-a", "Peripheral Battery", "-u", "critical", "-i", "battery-caution",
+             f"{label} battery low", f"{dev['level']}% left — plug it in"])
+
+# ---------- interactive ----------
+
+def ask(prompt, default=""):
+    try:
+        ans = input(f"{prompt}" + (f" [{default}]" if default else "") + ": ").strip()
+    except EOFError:
+        ans = ""
+    return ans or default
+
+def cmd_list():
+    found = scan_all()
+    if not found:
+        print("No devices detected. Make sure openrazer-daemon / headsetcontrol are installed and devices are on.")
+    for d in found:
+        lvl = "offline" if d["level"] is None else f"{d['level']}%"
+        print(f"[{d['source']}] {d['name']}  (match: {d['id']})  {lvl}")
+
+def cmd_setup():
+    found = scan_all()
+    cfg = configparser.ConfigParser(interpolation=None)
+    print(f"peripheral-battery setup — writes {CONFIG}\n")
+    cfg["settings"] = {"low": ask("Default low-battery warning (%)", str(DEFAULT_LOW))}
+    used = set()
+    for d in found:
+        lvl = "offline" if d["level"] is None else f"{d['level']}%"
+        if ask(f"\nFound {d['name']} via {d['source']} ({lvl}). Show it? (y/n)", "y").lower() != "y":
+            continue
+        label = ask("  Label", d["kind"].capitalize() if d["kind"] != "device" else d["name"])
+        while label in used:
+            label = ask("  Label already used, pick another", label + "2")
+        used.add(label)
+        cfg[f"device:{label}"] = {"source": d["source"], "match": d["id"],
+                                  "icon": ask("  Icon (emoji or text)", KIND_ICON[d["kind"]]),
+                                  "low": ask("  Warn below (%)", cfg["settings"]["low"])}
+    while ask("\nAdd a custom device read by your own command? (y/n)", "n").lower() == "y":
+        label = ask("  Label", "Device")
+        cfg[f"device:{label}"] = {"source": "command",
+                                  "command": ask("  Command that prints the battery percent"),
+                                  "icon": ask("  Icon", KIND_ICON["device"]),
+                                  "low": ask("  Warn below (%)", cfg["settings"]["low"])}
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(CONFIG, "w", encoding="utf-8") as f:
+        cfg.write(f)
+    print(f"\nSaved. Preview: {' '.join(fmt(i, d) for _, i, _, d in configured_devices(load_config()))}")
+
+def main(argv):
+    if "-h" in argv or "--help" in argv:
+        print(__doc__.strip()); return
+    if "--version" in argv:
+        print(VERSION); return
+    if "list" in argv:
+        cmd_list(); return
+    if "setup" in argv:
+        cmd_setup(); return
+    devices = configured_devices(load_config())
+    if "--alert" in argv:
+        alert(devices); return
+    line = "  ".join(fmt(icon, dev) for _, icon, _, dev in devices) or "🔋 no devices"
+    print(line)
+    if "--widget" in argv:
+        for label, _, _, dev in devices:
+            print(detail(label, dev))
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

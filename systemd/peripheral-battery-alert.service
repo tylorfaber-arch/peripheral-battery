@@ -1,0 +1,6 @@
+[Unit]
+Description=Low battery alert for wireless peripherals
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/peripheral-battery --alert

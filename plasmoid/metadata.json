@@ -1,0 +1,13 @@
+{
+  "KPlugin": {
+    "Id": "peripheral-battery",
+    "Name": "Peripheral Battery",
+    "Description": "Battery levels of wireless mice, headsets and controllers",
+    "Icon": "battery",
+    "Category": "System Information",
+    "License": "MIT",
+    "Version": "1.0.0"
+  },
+  "X-Plasma-API-Minimum-Version": "6.0",
+  "KPackageStructure": "Plasma/Applet"
+}
