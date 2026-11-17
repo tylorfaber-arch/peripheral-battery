@@ -11,7 +11,7 @@ optdepends=('openrazer-daemon: Razer wireless mice and keyboards'
             'headsetcontrol: SteelSeries, Logitech, Corsair, HyperX headsets'
             'upower: Bluetooth and Logitech receiver devices')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP_UNTIL_TAGGED')
+sha256sums=('c68c2d011c085f9419e9a585d65e33a91d0298ac1964b4c675f84d9d1070f8b8')
 
 package() {
   cd "$pkgname-$pkgver"

@@ -1,0 +1,17 @@
+pkgbase = peripheral-battery
+	pkgdesc = Battery levels of wireless mice, headsets and controllers on the KDE Plasma panel, with low-battery alerts
+	pkgver = 1.0.0
+	pkgrel = 1
+	url = https://github.com/tylorfaber-arch/peripheral-battery
+	arch = any
+	license = MIT
+	depends = python
+	depends = plasma-workspace
+	depends = libnotify
+	optdepends = openrazer-daemon: Razer wireless mice and keyboards
+	optdepends = headsetcontrol: SteelSeries, Logitech, Corsair, HyperX headsets
+	optdepends = upower: Bluetooth and Logitech receiver devices
+	source = peripheral-battery-1.0.0.tar.gz::https://github.com/tylorfaber-arch/peripheral-battery/archive/refs/tags/v1.0.0.tar.gz
+	sha256sums = c68c2d011c085f9419e9a585d65e33a91d0298ac1964b4c675f84d9d1070f8b8
+
+pkgname = peripheral-battery
