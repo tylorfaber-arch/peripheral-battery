@@ -21,7 +21,14 @@ Battery levels of your wireless mouse, headset, keyboard or controller, right on
 paru -S peripheral-battery
 ```
 
-Or build from this repo with `makepkg -si` in the `pkg/` folder, or `sudo make install` anywhere.
+Or build it from this repo:
+
+```bash
+git clone https://github.com/tylorfaber-arch/peripheral-battery
+cd peripheral-battery/pkg && makepkg -si
+```
+
+On other distros: `sudo make install`.
 
 Then:
 
