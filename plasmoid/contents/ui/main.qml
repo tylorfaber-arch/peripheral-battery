@@ -28,16 +28,30 @@ PlasmoidItem {
         }
     }
 
+    // The executable engine runs a command once per connect, so a Timer
+    // disconnects and reconnects it to read fresh values.
     P5.DataSource {
         id: poll
         engine: "executable"
-        connectedSources: [root.cmd]
-        interval: Plasmoid.configuration.interval * 1000
         onNewData: (source, data) => {
+            disconnectSource(source)
             const lines = data.stdout.trim().split("\n")
             if (lines[0]) root.items = lines[0].split(/\s{2,}/)
             root.details = lines.slice(1).join("\n")
         }
+    }
+
+    function refresh() {
+        poll.disconnectSource(root.cmd)
+        poll.connectSource(root.cmd)
+    }
+
+    Timer {
+        interval: Math.max(5, Plasmoid.configuration.interval) * 1000
+        running: true
+        repeat: true
+        triggeredOnStart: true
+        onTriggered: root.refresh()
     }
 
     P5.DataSource {
@@ -45,8 +59,7 @@ PlasmoidItem {
         engine: "executable"
         onNewData: (source, data) => {
             disconnectSource(source)
-            poll.connectedSources = []
-            poll.connectedSources = [root.cmd]
+            root.refresh()
         }
     }
 }
